@@ -1,0 +1,49 @@
+# LangGraph SQLite checkpointer database
+checkpoints.db
+checkpoints.db-journal
+checkpoints.db-wal
+checkpoints.db-shm
+
+# Per-user profile JSON store
+profiles/
+!profiles/.gitkeep
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment files (never commit secrets)
+.env
+.env.*
+!.env.example
+
+# Dataset CSVs (large/binary, kept out of version control)
+data/*.csv
+data/*.parquet
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

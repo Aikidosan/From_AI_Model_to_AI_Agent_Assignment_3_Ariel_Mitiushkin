@@ -18,8 +18,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
 
 ## Tasks
 
-- [ ] 1. Set up project scaffolding and dependency manifest
-  - [ ] 1.1 Create directory tree, dependency manifest, gitignore, and README skeleton
+- [x] 1. Set up project scaffolding and dependency manifest
+  - [x] 1.1 Create directory tree, dependency manifest, gitignore, and README skeleton
     - Create the full directory tree from the design's "Project Layout": `src/csa_agent/`, `src/csa_agent/tools/`, `tests/`, `data/`, `profiles/`.
     - Create empty `__init__.py` files in `src/csa_agent/`, `src/csa_agent/tools/`, and `tests/`.
     - Create `requirements.txt` with pinned versions for: `langgraph`, `langchain`, `langchain-openai`, `langgraph-checkpoint-sqlite`, `pandas`, `pydantic>=2`, `python-dotenv`, `fastmcp`, `streamlit`, `pytest`, `pytest-cov`, `hypothesis`, `pytest-httpx`.
@@ -27,14 +27,14 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - Create a `README.md` skeleton with empty sections for Setup, CLI Usage, MCP Connection, Architecture, and Model Justification (filled in by task 17.1).
     - _Requirements: 10.1, 10.2_
 
-- [ ] 2. Implement configuration and Nebius LLM factory
-  - [ ] 2.1 Implement `src/csa_agent/config.py` settings loader
+- [x] 2. Implement configuration and Nebius LLM factory
+  - [x] 2.1 Implement `src/csa_agent/config.py` settings loader
     - Define a `Settings` pydantic model exposing `nebius_api_key`, `nebius_base_url`, `nebius_model`, `dataset_path`, `checkpoint_db`, `profile_dir`, `max_iterations` with the defaults from the design's Configuration table.
     - Implement `get_settings()` that reads from environment (with `python-dotenv` for `.env`), trims whitespace, treats empty strings as missing, and exits with a non-zero status and a descriptive stderr message when `NEBIUS_API_KEY` is missing or empty.
     - Cache the `Settings` instance so subsequent calls are cheap.
     - _Requirements: 6.6, 9.3, 9.4_
 
-  - [ ] 2.2 Implement `src/csa_agent/llm.py` Nebius factory
+  - [x] 2.2 Implement `src/csa_agent/llm.py` Nebius factory
     - Implement `get_llm(temperature=0.0, model=None) -> ChatOpenAI` that constructs a `langchain_openai.ChatOpenAI` with `base_url=settings.nebius_base_url`, `api_key=settings.nebius_api_key`, `model=model or settings.nebius_model`.
     - This factory is the only LLM constructor in the codebase. Add a module-level docstring documenting that constraint (referenced by Property 14).
     - _Requirements: 9.1, 9.2_
@@ -43,8 +43,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - Cover: missing/empty `NEBIUS_API_KEY` triggers `SystemExit(1)`; valid env yields a `Settings` instance; defaults match the design table.
     - _Requirements: 9.3, 9.4, 6.6_
 
-- [ ] 3. Implement dataset loader and validation
-  - [ ] 3.1 Implement `src/csa_agent/dataset.py`
+- [x] 3. Implement dataset loader and validation
+  - [x] 3.1 Implement `src/csa_agent/dataset.py`
     - Define `REQUIRED_COLUMNS = {"utterance", "category", "intent"}` and `load_dataset(path: str) -> pandas.DataFrame`.
     - Support both CSV and Parquet by file extension.
     - Raise `FileNotFoundError` with a descriptive message when the path is missing; raise `ValueError` listing missing columns when validation fails.
@@ -55,15 +55,15 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - Use small fixture CSVs to cover: happy-path load, missing file → `FileNotFoundError`, missing-column file → `ValueError` listing the missing columns, repeated `get_dataset()` calls return the same object reference.
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
-- [ ] 4. Implement Pydantic tool input schemas
-  - [ ] 4.1 Create `src/csa_agent/tools/schemas.py`
+- [x] 4. Implement Pydantic tool input schemas
+  - [x] 4.1 Create `src/csa_agent/tools/schemas.py`
     - Define `ListCategoriesInput`, `FilterByIntentInput`, `FilterByCategoryInput`, `CountRowsInput`, `ShowExamplesInput`, `GetIntentDistributionInput`, `SummarizeCategoryInput` exactly as specified in the design "Pydantic Tool Input Schemas" subsection.
     - Apply `Field(..., ge=1, le=50)` to `ShowExamplesInput.n` so Pydantic rejects out-of-range values at validation time.
     - Define a `ToolError` Pydantic model with `error: str`, `message: str`, `value: str | None`.
     - _Requirements: 3.9, 3.5_
 
-- [ ] 5. Implement the seven dataset tools
-  - [ ] 5.1 Implement `src/csa_agent/tools/core.py` with a `build_tools(df)` factory
+- [x] 5. Implement the seven dataset tools
+  - [x] 5.1 Implement `src/csa_agent/tools/core.py` with a `build_tools(df)` factory
     - Implement `list_categories`, `filter_by_intent`, `filter_by_category`, `count_rows`, `show_examples`, `get_intent_distribution` as pure functions over the captured `df`.
     - `filter_by_*` results are capped at 100 rows (per design); `count_rows` always returns the full count.
     - `show_examples` clamps `n` to `[1, 50]` defensively even though the schema validates it.
@@ -71,7 +71,7 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - Wrap each function with LangChain's `@tool` decorator using the matching Pydantic input schema, and return them as `list[BaseTool]` from `build_tools(df)`.
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.8, 3.9_
 
-  - [ ] 5.2 Implement the `summarize_category` tool
+  - [x] 5.2 Implement the `summarize_category` tool
     - In the same `build_tools(df)` factory, add `summarize_category` which: validates the category exists (returns `ToolError` if not), samples representative utterances from the category, and produces a natural-language summary via `get_llm()` with a grounded prompt that includes the sampled utterances verbatim.
     - _Requirements: 3.7, 3.8, 9.1_
 
@@ -105,11 +105,11 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 3.8**
     - Use a `non_existent_string_st(df)` strategy that prefixes a guaranteed-absent sentinel and assert every category/intent-taking tool returns a `ToolError`-shaped dict and does not raise.
 
-- [ ] 6. Checkpoint - foundations and tools complete
+- [x] 6. Checkpoint - foundations and tools complete
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 7. Implement User Profile store
-  - [ ] 7.1 Implement `src/csa_agent/profile.py`
+- [x] 7. Implement User Profile store
+  - [x] 7.1 Implement `src/csa_agent/profile.py`
     - Define `UserProfile` Pydantic model with `user_id`, `name`, `frequent_topics`, `preferences`, `topic_counts`, `created_at`, `updated_at` per the design.
     - Implement `load_profile(user_id)` that reads `{profile_dir}/{user_id}.json` or returns a fresh profile if the file is absent.
     - Implement `save_profile(profile)` using atomic write (temp file + `os.replace`) to avoid partial writes.
@@ -121,8 +121,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 7.4, 7.5**
     - Use a `user_profiles_st()` strategy: assert `load_profile(save_profile(p).user_id) == p` and that `t in frequent_topics` iff `topic_counts[t] >= 3` after any sequence of `record_topic` calls.
 
-- [ ] 8. Implement checkpointer factory
-  - [ ] 8.1 Implement `src/csa_agent/checkpointer.py`
+- [x] 8. Implement checkpointer factory
+  - [x] 8.1 Implement `src/csa_agent/checkpointer.py`
     - Implement `get_checkpointer(db_path)` that returns a `SqliteSaver.from_conn_string(db_path)` context manager wrapper, or a `PostgresSaver` when `POSTGRES_URL` env var is set.
     - Validate that the parent directory of `db_path` exists and is writable; raise `OSError` with a descriptive message otherwise.
     - _Requirements: 6.1, 6.6_
@@ -132,8 +132,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 6.2, 6.4**
     - Generate a `message_sequences_st()` list, write it to a thread, close and reopen the SqliteSaver pointing at the same file, and assert recovered messages equal the input in order.
 
-- [ ] 9. Implement Query Router node
-  - [ ] 9.1 Implement `src/csa_agent/router.py`
+- [x] 9. Implement Query Router node
+  - [x] 9.1 Implement `src/csa_agent/router.py`
     - Define the `RouteLabel(str, Enum)` with `STRUCTURED`, `UNSTRUCTURED`, `OUT_OF_SCOPE` values.
     - Implement `classify_query(user_query, llm)` that uses `llm.with_structured_output(RouteLabel)` and a focused classification prompt with no tool bindings.
     - Coerce/clamp any unexpected raw output to a valid `RouteLabel` (defaulting to `OUT_OF_SCOPE` on parse failure) so the function is total.
@@ -144,8 +144,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 2.1**
     - Patch the LLM with a `FakeChatModel` that returns arbitrary Hypothesis-generated strings; assert `classify_query` always returns a `RouteLabel` member.
 
-- [ ] 10. Implement decline, summarize, and profile graph nodes
-  - [ ] 10.1 Implement `src/csa_agent/nodes.py`
+- [x] 10. Implement decline, summarize, and profile graph nodes
+  - [x] 10.1 Implement `src/csa_agent/nodes.py`
     - Implement `decline_node(state)` that appends the canonical refusal AIMessage and makes zero LLM/tool calls.
     - Implement `summarize_node(state)` as a small ReAct subgraph bound to `count_rows`, `show_examples`, `get_intent_distribution` plus a system prompt requiring grounded summaries.
     - Implement `load_user_profile_node(state, config)` that reads `config["configurable"]["user_id"]` and injects the loaded `UserProfile` into state.
@@ -157,8 +157,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 2.2, 2.5**
     - Patch `classify_query` to return `OUT_OF_SCOPE`; spy on the LLM factory and tool registry; assert zero LLM calls and zero tool invocations after the router.
 
-- [ ] 11. Assemble the LangGraph
-  - [ ] 11.1 Implement `src/csa_agent/graph.py` with `build_graph(...)`
+- [x] 11. Assemble the LangGraph
+  - [x] 11.1 Implement `src/csa_agent/graph.py` with `build_graph(...)`
     - Wire `__start__ → load_user_profile → query_router` with conditional edges to `decline_node`, `react_agent`, or `summarize_node` per the design's node graph.
     - Build the ReAct branch using `langgraph.prebuilt.create_react_agent(model=get_llm(), tools=build_tools(df), state_modifier=...)` with a `state_modifier` that injects the user profile context and a "ground answers in tool observations" instruction.
     - Apply a recursion limit of `settings.max_iterations` (15) on the ReAct subgraph and a graceful fallback message when the cap is reached.
@@ -187,8 +187,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 9.1, 9.2**
     - Combine: (a) `pytest-httpx` spy asserting outbound `base_url` matches `NEBIUS_BASE_URL` for every LLM call across a graph run; (b) static AST scan of `src/csa_agent/` rejecting any `ChatOpenAI(...)`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, etc. constructor outside `llm.py`.
 
-- [ ] 12. Implement CLI entry point
-  - [ ] 12.1 Implement `main.py`
+- [x] 12. Implement CLI entry point
+  - [x] 12.1 Implement `main.py`
     - Parse `--session`, `--user`, `--checkpoint-db` with `argparse`. Default `--user` to `"default"`. When `--session` is omitted, generate a `uuid4()` and print it.
     - Build the graph once via `build_graph(...)` and enter an interactive `input()` loop.
     - For each query, call `graph.stream(..., config={"configurable": {"thread_id": session_id, "user_id": user_id}}, stream_mode="updates")` and print each tool call as `🔧 tool_name(args) → observation` before the final answer.
@@ -208,8 +208,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - Pre-populate a profile, run a session asking "what do you remember about me?", assert the response includes the stored name/topics/preferences.
     - _Requirements: 7.3_
 
-- [ ] 13. Implement FastMCP server
-  - [ ] 13.1 Implement `mcp_server.py`
+- [x] 13. Implement FastMCP server
+  - [x] 13.1 Implement `mcp_server.py`
     - Initialize a FastMCP server, load the dataset via `get_dataset()`, and register at least 5 tools (`list_categories`, `count_rows`, `show_examples`, `filter_by_category`, `get_intent_distribution`) using `@mcp.tool()` with the same Pydantic input schemas from `tools/schemas.py`.
     - Make the file runnable with `python mcp_server.py` and configure host/port via env vars with sensible defaults.
     - Rely on FastMCP's Pydantic-driven validation so invalid inputs return a structured error.
@@ -220,11 +220,11 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 8.2, 8.5**
     - Spawn a FastMCP test client; for random valid inputs assert MCP result equals the direct tool result; for inputs violating the Pydantic schema assert a structured error response with no exception.
 
-- [ ] 14. Checkpoint - core agent, CLI, and MCP server complete
+- [x] 14. Checkpoint - core agent, CLI, and MCP server complete
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 15. Implement Streamlit UI (bonus)
-  - [ ] 15.1 Implement `app.py`
+- [x] 15. Implement Streamlit UI (bonus)
+  - [x] 15.1 Implement `app.py`
     - Build a `st.chat_input` + `st.chat_message` layout. Sidebar contains a session ID text input and a user ID input.
     - On submit, invoke the same compiled graph used by the CLI; render streaming updates inside an `st.status` block so reasoning steps appear before the final answer.
     - _Requirements: 11.1, 11.2, 11.3, 11.4_
@@ -233,8 +233,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - Use `streamlit.testing.v1.AppTest` to assert: the session sidebar input is rendered, submitting a query produces a chat message turn, and reasoning-step entries appear before the final answer.
     - _Requirements: 11.1, 11.2, 11.3, 11.4_
 
-- [ ] 16. Implement Query Recommender (bonus)
-  - [ ] 16.1 Implement `src/csa_agent/recommender.py`
+- [x] 16. Implement Query Recommender (bonus)
+  - [x] 16.1 Implement `src/csa_agent/recommender.py`
     - Detect the trigger phrase "What should I query next?" at the router level as a special intent.
     - Use `get_llm()` plus the loaded profile and recent message history to produce ≥ 3 follow-up suggestions.
     - Surface suggestions to the user and require explicit confirmation/refinement before invoking the normal routing path.
@@ -245,8 +245,8 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - **Validates: Requirements 12.1, 12.2, 12.5**
     - For arbitrary suggestion sets, assert at least 3 suggestions are produced and zero downstream queries execute until an explicit confirmation event is observed.
 
-- [ ] 17. Write documentation and repository hygiene
-  - [ ] 17.1 Fill in README sections
+- [x] 17. Write documentation and repository hygiene
+  - [x] 17.1 Fill in README sections
     - Setup (env vars, `requirements.txt` install, dataset path).
     - CLI usage examples (`python main.py`, `--session`, `--user`, `--checkpoint-db`, `exit`/`quit`).
     - MCP connection instructions with a concrete example MCP client request and response for at least one exposed tool.
@@ -259,7 +259,7 @@ All code is Python 3.11+. All LLM calls go through a single Nebius factory (`src
     - Assert `README.md` contains all five required section headings (Setup, CLI Usage, MCP Connection, Architecture, Model Justification).
     - _Requirements: 10.1, 10.2_
 
-- [ ] 18. Final checkpoint - Ensure all tests pass
+- [x] 18. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
