@@ -109,12 +109,29 @@ class AgentState(TypedDict, total=False):
         iterations: Counter incremented per ReAct tool call; capped at
             :data:`csa_agent.config.Settings.max_iterations` (15) by the
             graph layer.
+        awaiting_recommendation_confirmation: Whether the previous turn
+            ended with a recommender suggestion list and the agent is
+            waiting for the user to confirm, refine, or reject. Used
+            by :func:`csa_agent.graph._pre_router_route` to short-circuit
+            into :func:`confirmation_node` instead of the regular router.
+        pending_suggestions: The list of suggestion strings most recently
+            shown to the user. Populated by :func:`recommender_node`,
+            consumed by :func:`confirmation_node` (a numeric reply like
+            ``"2"`` resolves to ``pending_suggestions[1]``).
+        confirmation_action: A transient field set by
+            :func:`confirmation_node` to one of ``"confirmed"``,
+            ``"refined"``, ``"rejected"``. Used by the conditional edge
+            after the confirmation node to choose whether to run the
+            ReAct path or end the turn.
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
     route: RouteLabel | None
     user_profile: UserProfile
     iterations: int
+    awaiting_recommendation_confirmation: bool
+    pending_suggestions: list[str]
+    confirmation_action: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +262,44 @@ def summarize_node(state: AgentState) -> dict[str, Any]:
 _DEFAULT_USER_ID: str = "default"
 
 
+# System prompt used by the natural-conversation profile extractor. The
+# extractor is a small Nebius call run on every turn; it must produce
+# strict JSON or be ignored. Wording is deliberately conservative -- we
+# do not want hallucinated preferences -- so the prompt instructs the
+# model to return ``{}`` when nothing was actually revealed.
+_PROFILE_EXTRACT_SYSTEM_PROMPT: str = (
+    "You read the user's most recent message and decide whether they "
+    "revealed durable, personal facts that should be saved in their "
+    "profile. ONLY extract:\n"
+    "  - name: the user's preferred name, if they introduced themselves "
+    "(e.g. 'my name is Ariel', 'I'm Sasha', 'call me Mo'). Otherwise omit.\n"
+    "  - preferences: short key/value pairs about how the user wants the "
+    "agent to respond. Examples: tone=brief, language=en, "
+    "verbosity=concise, format=bullets, examples=many. Only emit a "
+    "preference when the user expressed it explicitly (e.g. 'keep "
+    "answers short', 'reply in Spanish', 'use bullet points').\n"
+    "Output strict JSON in this shape: "
+    "{\"name\": <str|null>, \"preferences\": {<key>: <value>, ...}}. "
+    "Use {} (empty preferences object) and null name when the user did "
+    "NOT reveal anything. Do NOT invent or guess. Output ONLY the JSON, "
+    "no prose, no markdown fences."
+)
+
+
+# Maximum length of the user message the extractor sees. Longer messages
+# are truncated -- a name or preference is always near the start of a
+# turn, and the extractor doesn't need 5 KB of context to decide.
+_PROFILE_EXTRACT_MAX_CHARS: int = 600
+
+
+# Whitelist of preference keys the extractor is allowed to introduce.
+# Values are still free-form (so "tone=very brief and to the point" is
+# fine), but unknown keys are dropped to keep the profile shape stable.
+_ALLOWED_PREFERENCE_KEYS: frozenset[str] = frozenset(
+    {"tone", "language", "verbosity", "format", "examples", "detail"}
+)
+
+
 def _user_id_from_config(config: dict[str, Any] | None) -> str:
     """Extract ``user_id`` from a LangGraph runnable config.
 
@@ -288,7 +343,159 @@ def load_user_profile_node(
     return {"user_profile": profile}
 
 
+def _extract_profile_facts_from_turn(
+    user_message: str,
+    llm: Any | None = None,
+) -> dict[str, Any]:
+    """Best-effort extraction of name + preferences from a user message.
+
+    Performs one short Nebius call asking the model to return strict
+    JSON describing any facts the user revealed (name, preference
+    key/value pairs). The function never raises -- on any failure
+    (network, parse, validation) it returns ``{}`` so the calling
+    profile-update path treats the turn as "no extraction" and proceeds
+    normally.
+
+    Args:
+        user_message: The latest user turn text.
+        llm: Optional pre-constructed chat client. When ``None``,
+            :func:`csa_agent.llm.get_llm` is used so every LLM call
+            still flows through the single Nebius factory (Property 14).
+
+    Returns:
+        A dict with optional keys ``name`` (string) and ``preferences``
+        (mapping of allowed-key strings to free-form values). May be
+        empty.
+    """
+
+    import json
+    import re
+
+    text = (user_message or "").strip()
+    if not text:
+        return {}
+    if len(text) > _PROFILE_EXTRACT_MAX_CHARS:
+        text = text[:_PROFILE_EXTRACT_MAX_CHARS]
+
+    try:
+        client = llm if llm is not None else get_llm()
+        response = client.invoke(
+            [
+                ("system", _PROFILE_EXTRACT_SYSTEM_PROMPT),
+                ("human", text),
+            ]
+        )
+    except Exception:
+        return {}
+
+    raw = getattr(response, "content", response)
+    if isinstance(raw, list):
+        # Multimodal-style content: flatten to text.
+        raw = " ".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part)
+            for part in raw
+        )
+    if not isinstance(raw, str):
+        return {}
+
+    # Strip markdown code fences if the model wrapped its JSON.
+    cleaned = raw.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", cleaned, re.DOTALL)
+    if fence:
+        cleaned = fence.group(1).strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    out: dict[str, Any] = {}
+    name = parsed.get("name")
+    if isinstance(name, str) and name.strip():
+        out["name"] = name.strip()
+
+    prefs_raw = parsed.get("preferences")
+    if isinstance(prefs_raw, dict) and prefs_raw:
+        cleaned_prefs: dict[str, str] = {}
+        for key, value in prefs_raw.items():
+            if not isinstance(key, str):
+                continue
+            normalised_key = key.strip().lower()
+            if normalised_key not in _ALLOWED_PREFERENCE_KEYS:
+                continue
+            if isinstance(value, str) and value.strip():
+                cleaned_prefs[normalised_key] = value.strip()
+        if cleaned_prefs:
+            out["preferences"] = cleaned_prefs
+
+    return out
+
+
+def _latest_human_message_text(messages: list[BaseMessage]) -> str:
+    """Return the trimmed text of the most recent ``HumanMessage``.
+
+    Returns an empty string when no human message is present so the
+    extractor can short-circuit on degenerate inputs.
+    """
+
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                return " ".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                ).strip()
+            return str(content).strip()
+    return ""
+
+
 def _topics_in_current_turn(messages: list[BaseMessage]) -> set[str]:
+    """Return category/intent topic strings referenced in the current turn.
+
+    "Current turn" is defined as the message slice starting at the last
+    :class:`HumanMessage`. Limiting extraction to that slice avoids
+    re-counting tool calls from earlier turns each time
+    :func:`update_profile_node` runs, which would otherwise inflate
+    ``topic_counts`` beyond what the user actually queried this turn.
+
+    The function inspects ``tool_calls`` on AIMessages (LangChain's
+    standard attribute name) and pulls the ``category`` and ``intent``
+    arguments from each call. Both dict-shaped tool calls (the modern
+    LangChain representation) and object-shaped ones are handled.
+    """
+
+    if not messages:
+        return set()
+
+    # Find the last HumanMessage to mark the start of the current turn.
+    last_human_idx: int = -1
+    for i, msg in enumerate(messages):
+        if isinstance(msg, HumanMessage):
+            last_human_idx = i
+    turn_messages = (
+        messages[last_human_idx:] if last_human_idx >= 0 else list(messages)
+    )
+
+    topics: set[str] = set()
+    for msg in turn_messages:
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                args = tc.get("args") or {}
+            else:
+                args = getattr(tc, "args", {}) or {}
+            if not isinstance(args, dict):
+                continue
+            for key in ("category", "intent"):
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    topics.add(value.strip())
+    return topics
     """Return category/intent topic strings referenced in the current turn.
 
     "Current turn" is defined as the message slice starting at the last
@@ -372,9 +579,32 @@ def update_profile_node(
             # isolation). Load by user_id so the topic counters survive.
             profile = load_profile(_user_id_from_config(config))
 
-        topics = _topics_in_current_turn(list(state.get("messages", [])))
+        messages_list = list(state.get("messages", []))
+
+        topics = _topics_in_current_turn(messages_list)
         for topic in topics:
             record_topic(profile, topic)
+
+        # Best-effort extraction of natural-conversation facts (name,
+        # preferences). Wrapped here in addition to the outer try block
+        # so a parse failure of the extractor's response does not skip
+        # the topic counters above.
+        try:
+            user_text = _latest_human_message_text(messages_list)
+            if user_text:
+                facts = _extract_profile_facts_from_turn(user_text)
+                extracted_name = facts.get("name")
+                if isinstance(extracted_name, str) and extracted_name and not profile.name:
+                    profile.name = extracted_name
+                extracted_prefs = facts.get("preferences")
+                if isinstance(extracted_prefs, dict):
+                    for key, value in extracted_prefs.items():
+                        if isinstance(key, str) and isinstance(value, str):
+                            profile.preferences[key] = value
+        except Exception:  # noqa: BLE001 - extraction is opportunistic
+            logger.warning(
+                "update_profile_node: profile fact extraction failed", exc_info=True
+            )
 
         saved = save_profile(profile)
         return {"user_profile": saved}
@@ -397,9 +627,257 @@ def update_profile_node(
 __all__ = [
     "AgentState",
     "CANONICAL_REFUSAL",
+    "confirmation_node",
     "decline_node",
     "load_user_profile_node",
+    "recommender_node",
     "reset_summarize_subagent_cache",
     "summarize_node",
     "update_profile_node",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Recommender + confirmation nodes (Bonus B / Requirement 12)
+# ---------------------------------------------------------------------------
+
+#: Short list of regex-friendly trigger words for "user confirmed". Kept
+#: deliberately small and case-insensitive; anything else falls through
+#: to the refinement path. The set covers the canonical phrasings from
+#: the assignment example ("yes", "do it", "go ahead", "proceed",
+#: "confirm") plus terse variants ("ok", "sure", "y").
+_CONFIRM_PHRASES: frozenset[str] = frozenset(
+    {
+        "yes", "y", "ok", "okay", "sure", "do it", "go ahead",
+        "proceed", "confirm", "confirmed", "yep", "yeah", "please do",
+        "please go ahead",
+    }
+)
+
+
+#: Phrases that explicitly reject the offered suggestions. When matched
+#: the confirmation node ends the turn with a polite acknowledgement
+#: and clears the pending state.
+_REJECT_PHRASES: frozenset[str] = frozenset(
+    {"no", "n", "nope", "cancel", "stop", "never mind", "nevermind", "skip"},
+)
+
+
+def _latest_user_text(messages: list[BaseMessage]) -> str:
+    """Return the trimmed text of the most recent ``HumanMessage``.
+
+    Returns an empty string when no human message is present so callers
+    can match on the empty string and fall through to the safe default
+    branch rather than crashing on degenerate inputs.
+    """
+
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                # LangChain occasionally packs multimodal content as a
+                # list of parts; flatten to plain text for matching.
+                flattened = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+                return flattened.strip()
+            return str(content).strip()
+    return ""
+
+
+def _looks_like_confirmation(reply: str) -> bool:
+    """True iff ``reply`` reads as a yes/confirm to a suggestion list.
+
+    Recognises both single-phrase confirmations (``"yes"``, ``"do it"``)
+    and compound replies (``"yes, do it."``, ``"sure - go ahead"``) by
+    splitting on common separators and matching any segment against
+    :data:`_CONFIRM_PHRASES`.
+    """
+
+    import re
+
+    normalised = " ".join(reply.lower().split())
+    if not normalised:
+        return False
+    if normalised in _CONFIRM_PHRASES:
+        return True
+    # Tolerate trailing punctuation like "yes." or "do it!" by stripping
+    # common terminal characters before re-matching.
+    stripped = normalised.rstrip(".!?")
+    if stripped in _CONFIRM_PHRASES:
+        return True
+    # Compound reply: split on commas, semicolons, dashes, periods and
+    # exclamation marks, then check whether any segment is a known
+    # confirmation phrase. This catches "yes, do it.", "sure - go ahead",
+    # "ok. proceed", and similar.
+    segments = re.split(r"[,;\-\.!\?]+", stripped)
+    return any(seg.strip() in _CONFIRM_PHRASES for seg in segments if seg.strip())
+
+
+def _looks_like_rejection(reply: str) -> bool:
+    """True iff ``reply`` reads as a no/cancel to a suggestion list."""
+
+    normalised = " ".join(reply.lower().split())
+    stripped = normalised.rstrip(".!?")
+    return normalised in _REJECT_PHRASES or stripped in _REJECT_PHRASES
+
+
+def _selected_suggestion_index(reply: str, suggestion_count: int) -> int | None:
+    """Parse a numeric pick (e.g. ``"1"``, ``"2."``, ``"option 3"``).
+
+    Returns the zero-based index when the reply unambiguously selects
+    one of the surfaced suggestions, otherwise ``None``. The caller
+    should treat ``None`` as "no number was specified" and fall back
+    to either a confirmation or a refinement.
+    """
+
+    import re
+
+    match = re.search(r"\b(\d+)\b", reply)
+    if match is None:
+        return None
+    try:
+        n = int(match.group(1))
+    except ValueError:
+        return None
+    if 1 <= n <= suggestion_count:
+        return n - 1
+    return None
+
+
+_RECOMMENDER_REJECTION_MESSAGE: str = (
+    "No problem -- let me know if you'd like suggestions later."
+)
+
+
+def recommender_node(state: AgentState) -> dict[str, Any]:
+    """Generate follow-up query suggestions and arm the confirmation gate.
+
+    Triggered by :func:`csa_agent.graph._pre_router_route` when the
+    latest user message matches a recommender trigger phrase
+    (e.g. *"What should I query next?"*). Generates at least three
+    suggestions grounded in the user profile and recent conversation
+    history, formats them as a numbered list, and sets
+    ``awaiting_recommendation_confirmation=True`` so the next turn
+    is intercepted by :func:`confirmation_node` rather than the
+    regular query router.
+
+    The function is read-only with respect to the dataset: it never
+    invokes a dataset tool or the ReAct sub-agent. This is the
+    contract Property 16 verifies (Requirement 12.5).
+    """
+
+    # Local imports keep the recommender's deps lazy: ``recommender.py``
+    # pulls in the LLM factory which we don't need on the hot path of
+    # other turns.
+    from .recommender import (
+        format_suggestions_message,
+        generate_suggestions,
+    )
+
+    profile = state.get("user_profile") or load_profile(_DEFAULT_USER_ID)
+    messages: list[BaseMessage] = list(state.get("messages", []))
+
+    suggestions = generate_suggestions(profile, messages)
+    rendered = format_suggestions_message(suggestions)
+
+    return {
+        "messages": [AIMessage(content=rendered)],
+        "awaiting_recommendation_confirmation": True,
+        "pending_suggestions": suggestions,
+        # Clear any stale route from a prior turn so the post-confirmation
+        # branch does not accidentally fall through into a previous
+        # classification.
+        "route": None,
+    }
+
+
+def confirmation_node(
+    state: AgentState,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Interpret the user's reply to a previously surfaced suggestion list.
+
+    Three branches:
+
+    * **Confirmed.** The user said "yes" / "do it" / etc., or gave a
+      numeric pick. The confirmation node injects the chosen suggestion
+      into the conversation as a fresh ``HumanMessage`` (so the rest of
+      the graph sees it as the new query) and clears the pending state.
+      The conditional edge then forwards the turn through the normal
+      router -> ReAct path.
+    * **Rejected.** The user said "no" / "cancel". The agent clears
+      pending state and emits a polite acknowledgement; no downstream
+      query is run.
+    * **Refined.** Anything else is treated as a refinement. The agent
+      generates a new suggestion list grounded in the refinement text
+      and the original suggestions, re-arms the confirmation gate, and
+      waits for another turn.
+
+    Returns the partial-state update plus a ``confirmation_action``
+    field consumed by :func:`csa_agent.graph._after_confirmation_route`.
+    """
+
+    del config  # unused; kept for signature parity with other nodes
+
+    from .recommender import format_suggestions_message, generate_suggestions
+
+    messages: list[BaseMessage] = list(state.get("messages", []))
+    pending: list[str] = list(state.get("pending_suggestions") or [])
+    profile = state.get("user_profile") or load_profile(_DEFAULT_USER_ID)
+    reply = _latest_user_text(messages)
+
+    # Branch 1: numeric selection ("1", "2.", "option 3").
+    chosen_index = _selected_suggestion_index(reply, len(pending))
+    if chosen_index is not None:
+        chosen = pending[chosen_index]
+        return {
+            # Inject the selected suggestion as if the user had typed it
+            # so the regular router classifies and the ReAct agent runs.
+            "messages": [HumanMessage(content=chosen)],
+            "awaiting_recommendation_confirmation": False,
+            "pending_suggestions": [],
+            "confirmation_action": "confirmed",
+            "route": None,
+        }
+
+    # Branch 2: explicit confirmation. Pick the first pending suggestion
+    # because the user has not specified one. (Falling back to "the most
+    # recent suggestion" matches the rubric's example flow where a user
+    # says "yes, do it" after a single proposed query.)
+    if _looks_like_confirmation(reply) and pending:
+        chosen = pending[0]
+        return {
+            "messages": [HumanMessage(content=chosen)],
+            "awaiting_recommendation_confirmation": False,
+            "pending_suggestions": [],
+            "confirmation_action": "confirmed",
+            "route": None,
+        }
+
+    # Branch 3: explicit rejection.
+    if _looks_like_rejection(reply):
+        return {
+            "messages": [AIMessage(content=_RECOMMENDER_REJECTION_MESSAGE)],
+            "awaiting_recommendation_confirmation": False,
+            "pending_suggestions": [],
+            "confirmation_action": "rejected",
+            "route": None,
+        }
+
+    # Branch 4: anything else is a refinement. Re-roll the suggestions
+    # using the refinement text as additional context. We pass the
+    # whole message history so ``generate_suggestions`` can see both
+    # the original prompt and the user's correction.
+    suggestions = generate_suggestions(profile, messages)
+    rendered = format_suggestions_message(suggestions)
+    return {
+        "messages": [AIMessage(content=rendered)],
+        "awaiting_recommendation_confirmation": True,
+        "pending_suggestions": suggestions,
+        "confirmation_action": "refined",
+        "route": None,
+    }

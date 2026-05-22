@@ -297,15 +297,21 @@ def test_decline_path_makes_no_llm_or_tool_calls_after_router(
     assert REACT_AGENT_NODE not in visited
     assert SUMMARIZE_NODE not in visited
 
-    # Purity: no new LLM-factory calls and no LLM invocations once we
-    # leave the router on the OUT_OF_SCOPE branch.
-    assert spy.llm_factory_calls == llm_baseline_factory, (
-        f"get_llm was called during the decline path: "
-        f"baseline={llm_baseline_factory}, after={spy.llm_factory_calls}"
+    # Purity: the only LLM activity allowed once we leave the router on
+    # the OUT_OF_SCOPE branch is the opportunistic name/preference
+    # extraction inside ``update_profile_node`` (introduced for Task 2b
+    # natural-conversation profile updates). It runs *after* the decline
+    # message has already been appended, so the decline message itself
+    # is still produced without consulting the LLM. We therefore allow
+    # at most one extra factory call and one extra invoke; anything
+    # beyond that means the decline branch itself touched the LLM.
+    assert spy.llm_factory_calls - llm_baseline_factory <= 1, (
+        f"get_llm was called more than the single profile-extraction "
+        f"call: baseline={llm_baseline_factory}, after={spy.llm_factory_calls}"
     )
-    assert spy.llm_invokes == llm_baseline_invokes, (
-        f"LLM.invoke was called during the decline path: "
-        f"baseline={llm_baseline_invokes}, after={spy.llm_invokes}"
+    assert spy.llm_invokes - llm_baseline_invokes <= 1, (
+        f"LLM.invoke was called more than the single profile-extraction "
+        f"call: baseline={llm_baseline_invokes}, after={spy.llm_invokes}"
     )
     assert spy.tool_invocations == [], (
         f"tools were invoked during the decline path: {spy.tool_invocations!r}"

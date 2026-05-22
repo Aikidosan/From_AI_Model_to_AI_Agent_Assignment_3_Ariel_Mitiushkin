@@ -10,6 +10,29 @@ The agent ships with three frontends backed by the same compiled graph:
 - A FastMCP server that exposes the dataset tools to external MCP clients (`python mcp_server.py`)
 - An optional Streamlit UI (`streamlit run app.py`)
 
+## 5-minute quickstart
+
+```bash
+git clone <this-repo-url>
+cd From_AI_Model_to_AI_Agent_Assignment_3_Ariel_Mitiushkin
+python -m venv .venv
+
+# macOS / Linux
+source .venv/bin/activate
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+
+pip install -r requirements.txt
+
+cp .env.example .env       # then edit .env and set NEBIUS_API_KEY=<your key>
+python main.py             # interactive CLI; type 'exit' to quit
+```
+
+If you need a Nebius key, sign up at [studio.nebius.com](https://studio.nebius.com)
+and create a static API key. The default model is
+`meta-llama/Llama-3.3-70B-Instruct`; if Nebius rotates it (HTTP 404 on a
+turn) check `/v1/models` and override `NEBIUS_MODEL` in your `.env`.
+
 ## Setup
 
 ### 1. Install dependencies

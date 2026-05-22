@@ -18,23 +18,26 @@ This module implements Requirement 11 (Streamlit UI, bonus):
   inside a single :func:`st.status` block so reasoning steps appear
   *before* the final answer (Req 11.3, 11.4).
 
-Persistence trade-off
----------------------
+Persistence
+-----------
 
-Per the design's "Streamlit UI" section, the CLI is the primary
-persistence frontend. The Streamlit demo therefore builds the graph
-*without* a checkpointer (``checkpointer=None``) to avoid plumbing the
-:func:`csa_agent.checkpointer.get_checkpointer` context manager into
-Streamlit's long-lived session state. Conversation history is kept
-in-memory via ``st.session_state.messages`` for the duration of the
-browser session; the CLI remains the path that satisfies the
-durable-persistence acceptance criteria (Reqs 6.1-6.5).
+The Streamlit app shares the same :class:`SqliteSaver` checkpoint
+database as the CLI. Reusing a session ID in the sidebar restores the
+full conversation history from the checkpoint, so users can switch
+between or resume conversations across browser refreshes and process
+restarts (matching Requirement 11.2's "restore a session" promise).
+
+The checkpointer is opened once at app startup via
+``@st.cache_resource`` and intentionally kept open for the process
+lifetime; Streamlit does not provide a clean shutdown hook for cached
+resources, so the SQLite connection lives until the server stops.
 """
 
 from __future__ import annotations
 
 import sys
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +60,8 @@ if _SRC_DIR.is_dir():
 import streamlit as st  # noqa: E402  -- import after sys.path tweak
 from langchain_core.messages import HumanMessage  # noqa: E402
 
+from csa_agent.checkpointer import get_checkpointer  # noqa: E402
+from csa_agent.config import get_settings  # noqa: E402
 from csa_agent.graph import build_graph, stream_graph  # noqa: E402
 
 
@@ -68,30 +73,36 @@ from csa_agent.graph import build_graph, stream_graph  # noqa: E402
 _MESSAGES_KEY = "messages"
 _SESSION_ID_KEY = "session_id"
 _USER_ID_KEY = "user_id"
-_GRAPH_KEY = "_compiled_graph"
+_LAST_LOADED_SESSION_KEY = "_last_loaded_session_id"
 
 #: Default user id when the sidebar input is left blank.
 _DEFAULT_USER_ID = "default"
 
 
 # ---------------------------------------------------------------------------
-# Graph caching
+# Graph + checkpointer caching (process-wide singletons)
 # ---------------------------------------------------------------------------
 
 
-def _get_or_build_graph() -> Any:
-    """Return a cached compiled graph, building it once per Streamlit session.
+@st.cache_resource(show_spinner=False)
+def _get_compiled_graph() -> Any:
+    """Build the compiled graph once per Streamlit process.
 
-    The compiled graph is stored in ``st.session_state`` so we do not pay
-    the dataset-load + tool-build cost on every interaction. The graph is
-    built without a checkpointer (see module docstring for the rationale).
+    The :func:`csa_agent.checkpointer.get_checkpointer` factory is a
+    context manager. We enter it through an :class:`ExitStack` that we
+    deliberately leak (Streamlit caches resources for the process
+    lifetime and does not provide a teardown hook), so the underlying
+    SQLite connection stays open and serves both the CLI and the
+    Streamlit app.
+
+    The same database file is used by ``main.py``, so a session ID
+    created in the CLI can be resumed in the browser and vice versa.
     """
 
-    graph = st.session_state.get(_GRAPH_KEY)
-    if graph is None:
-        graph = build_graph(checkpointer=None)
-        st.session_state[_GRAPH_KEY] = graph
-    return graph
+    settings = get_settings()
+    stack = ExitStack()
+    saver = stack.enter_context(get_checkpointer(settings.checkpoint_db))
+    return build_graph(checkpointer=saver)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +128,44 @@ def _format_tool_event(name: str, args: dict[str, Any], observation: Any) -> str
     return line
 
 
+def _restore_history_from_checkpoint(session_id: str) -> list[dict[str, str]]:
+    """Replay the persisted message history for ``session_id`` as Streamlit entries.
+
+    Reads the most recent checkpoint for the given thread and converts
+    its ``messages`` field into the simple ``{"role", "content"}`` shape
+    Streamlit's session state uses. Tool messages and AI messages that
+    only carry tool calls are skipped because they are reasoning steps,
+    not user-visible turns.
+    """
+
+    from langchain_core.messages import AIMessage, HumanMessage as _HumanMessage
+
+    graph = _get_compiled_graph()
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        snapshot = graph.get_state(config)
+    except Exception:
+        # No prior thread or unreadable checkpoint -- start fresh.
+        return []
+    if snapshot is None or not getattr(snapshot, "values", None):
+        return []
+
+    messages = snapshot.values.get("messages") or []
+    history: list[dict[str, str]] = []
+    for msg in messages:
+        if isinstance(msg, _HumanMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            history.append({"role": "user", "content": content})
+        elif isinstance(msg, AIMessage):
+            # Skip tool-call AIMessages; only render user-facing replies.
+            if getattr(msg, "tool_calls", None):
+                continue
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if content:
+                history.append({"role": "assistant", "content": content})
+    return history
+
+
 def _render_history() -> None:
     """Render the chat history stored in ``st.session_state.messages``."""
 
@@ -135,7 +184,7 @@ def _run_turn(prompt: str, session_id: str, user_id: str) -> str:
     chat history.
     """
 
-    graph = _get_or_build_graph()
+    graph = _get_compiled_graph()
     config = {
         "configurable": {
             "thread_id": session_id,
@@ -202,8 +251,9 @@ def main() -> None:
         session_id = st.text_input(
             "Session ID",
             help=(
-                "Unique identifier for this conversation. Reuse a value to "
-                "restore a prior session (when persistence is enabled)."
+                "Unique identifier for this conversation. Reuse a value "
+                "(from the CLI or a prior browser session) to restore the "
+                "full message history."
             ),
             key=_SESSION_ID_KEY,
         )
@@ -214,9 +264,30 @@ def main() -> None:
         )
         user_id = user_id_raw.strip() or _DEFAULT_USER_ID
 
-        if st.button("Clear chat history", use_container_width=True):
-            st.session_state[_MESSAGES_KEY] = []
-            st.rerun()
+        col_clear, col_resume = st.columns(2)
+        with col_clear:
+            if st.button("Clear chat", use_container_width=True):
+                st.session_state[_MESSAGES_KEY] = []
+                st.session_state[_LAST_LOADED_SESSION_KEY] = None
+                st.rerun()
+        with col_resume:
+            if st.button("Resume session", use_container_width=True):
+                st.session_state[_MESSAGES_KEY] = _restore_history_from_checkpoint(
+                    session_id
+                )
+                st.session_state[_LAST_LOADED_SESSION_KEY] = session_id
+                st.rerun()
+
+    # Auto-resume on first render of a session ID we haven't loaded yet.
+    # This makes the round-trip transparent: type a session ID that
+    # already exists in the checkpoint database, and the UI shows its
+    # history without an extra click.
+    last_loaded = st.session_state.get(_LAST_LOADED_SESSION_KEY)
+    if last_loaded != session_id and not st.session_state[_MESSAGES_KEY]:
+        restored = _restore_history_from_checkpoint(session_id)
+        if restored:
+            st.session_state[_MESSAGES_KEY] = restored
+        st.session_state[_LAST_LOADED_SESSION_KEY] = session_id
 
     # ------------------------------------------------------------------
     # Main area: history + chat input (Req 11.1).

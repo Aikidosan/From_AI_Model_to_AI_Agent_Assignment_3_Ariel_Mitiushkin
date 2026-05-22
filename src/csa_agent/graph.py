@@ -60,12 +60,15 @@ from .dataset import get_dataset
 from .llm import get_llm
 from .nodes import (
     AgentState,
+    confirmation_node,
     decline_node,
     load_user_profile_node,
+    recommender_node,
     summarize_node,
     update_profile_node,
 )
 from .profile import UserProfile
+from .recommender import is_recommender_trigger
 from .router import RouteLabel, classify_query
 from .tools.core import build_tools
 
@@ -82,6 +85,8 @@ REACT_AGENT_NODE: str = "react_agent"
 SUMMARIZE_NODE: str = "summarize"
 DECLINE_NODE: str = "decline"
 UPDATE_PROFILE_NODE: str = "update_profile"
+RECOMMENDER_NODE: str = "recommender"
+CONFIRMATION_NODE: str = "confirmation"
 
 
 #: Base system prompt for the ReAct sub-agent. Per-call profile context is
@@ -204,6 +209,52 @@ def _route_from_state(state: AgentState) -> str:
     return DECLINE_NODE
 
 
+def _pre_router_route(state: AgentState) -> str:
+    """Conditional-edge function evaluated immediately after profile load.
+
+    Three branches:
+
+    1. **Awaiting confirmation.** When the previous turn ended in a
+       recommender suggestion list, ``state['awaiting_recommendation_confirmation']``
+       is ``True`` and the latest user message is interpreted as a reply
+       (confirm / refine / reject). Route to :func:`confirmation_node`.
+    2. **Recommender trigger.** When the latest user message matches a
+       recommender trigger phrase such as *"What should I query next?"*,
+       route to :func:`recommender_node` to surface suggestions instead
+       of running the normal classification pipeline.
+    3. **Normal flow.** Anything else routes through the regular query
+       router so structured / unstructured / out-of-scope classification
+       runs as before.
+    """
+
+    if isinstance(state, dict) and state.get("awaiting_recommendation_confirmation"):
+        return CONFIRMATION_NODE
+
+    messages = state.get("messages", []) if isinstance(state, dict) else []
+    latest_human = _latest_human_text(list(messages))
+    if latest_human and is_recommender_trigger(latest_human):
+        return RECOMMENDER_NODE
+
+    return QUERY_ROUTER_NODE
+
+
+def _after_confirmation_route(state: AgentState) -> str:
+    """Where to go after :func:`confirmation_node` runs.
+
+    * ``"confirmed"`` -- the user picked a suggestion, which has been
+      injected as a fresh ``HumanMessage``. Route through the regular
+      query router so the chosen query is classified and executed.
+    * ``"refined"`` / ``"rejected"`` -- the turn ends here. Skip the
+      regular pipeline and go straight to ``update_profile`` so the
+      checkpoint persists and the next user message starts fresh.
+    """
+
+    action = state.get("confirmation_action") if isinstance(state, dict) else None
+    if action == "confirmed":
+        return QUERY_ROUTER_NODE
+    return UPDATE_PROFILE_NODE
+
+
 def _make_react_agent_node(tools: list[BaseTool]) -> Any:
     """Build the ReAct sub-agent and wrap it in a graph node function.
 
@@ -294,10 +345,26 @@ def build_graph(
     builder.add_node(SUMMARIZE_NODE, summarize_node)
     builder.add_node(DECLINE_NODE, decline_node)
     builder.add_node(UPDATE_PROFILE_NODE, update_profile_node)
+    builder.add_node(RECOMMENDER_NODE, recommender_node)
+    builder.add_node(CONFIRMATION_NODE, confirmation_node)
 
     # Wire the deterministic edges.
     builder.add_edge(START, LOAD_PROFILE_NODE)
-    builder.add_edge(LOAD_PROFILE_NODE, QUERY_ROUTER_NODE)
+
+    # Pre-router fan-out: profile load -> {confirmation, recommender, query_router}.
+    # When the previous turn ended in a suggestion list, skip the
+    # classifier; when the latest user message is a recommender trigger,
+    # route to the recommender; otherwise fall through to the normal
+    # router.
+    builder.add_conditional_edges(
+        LOAD_PROFILE_NODE,
+        _pre_router_route,
+        {
+            CONFIRMATION_NODE: CONFIRMATION_NODE,
+            RECOMMENDER_NODE: RECOMMENDER_NODE,
+            QUERY_ROUTER_NODE: QUERY_ROUTER_NODE,
+        },
+    )
 
     # Routing fan-out from the query_router node.
     builder.add_conditional_edges(
@@ -310,10 +377,23 @@ def build_graph(
         },
     )
 
+    # Confirmation fan-out:
+    # * confirmed -> route the injected query through the regular pipeline.
+    # * refined / rejected -> end the turn after persisting the profile.
+    builder.add_conditional_edges(
+        CONFIRMATION_NODE,
+        _after_confirmation_route,
+        {
+            QUERY_ROUTER_NODE: QUERY_ROUTER_NODE,
+            UPDATE_PROFILE_NODE: UPDATE_PROFILE_NODE,
+        },
+    )
+
     # Convergence into the profile-update tail.
     builder.add_edge(REACT_AGENT_NODE, UPDATE_PROFILE_NODE)
     builder.add_edge(SUMMARIZE_NODE, UPDATE_PROFILE_NODE)
     builder.add_edge(DECLINE_NODE, UPDATE_PROFILE_NODE)
+    builder.add_edge(RECOMMENDER_NODE, UPDATE_PROFILE_NODE)
     builder.add_edge(UPDATE_PROFILE_NODE, END)
 
     return builder.compile(checkpointer=checkpointer)
@@ -443,10 +523,12 @@ def stream_graph(
 
 
 __all__ = [
+    "CONFIRMATION_NODE",
     "DECLINE_NODE",
     "LOAD_PROFILE_NODE",
     "QUERY_ROUTER_NODE",
     "REACT_AGENT_NODE",
+    "RECOMMENDER_NODE",
     "SUMMARIZE_NODE",
     "UPDATE_PROFILE_NODE",
     "build_graph",
