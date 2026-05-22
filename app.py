@@ -89,20 +89,44 @@ def _get_compiled_graph() -> Any:
     """Build the compiled graph once per Streamlit process.
 
     The :func:`csa_agent.checkpointer.get_checkpointer` factory is a
-    context manager. We enter it through an :class:`ExitStack` that we
-    deliberately leak (Streamlit caches resources for the process
-    lifetime and does not provide a teardown hook), so the underlying
-    SQLite connection stays open and serves both the CLI and the
-    Streamlit app.
+    context manager. We enter it through a module-level
+    :class:`ExitStack` (``_RESOURCE_STACK`` below) so the underlying
+    SQLite connection's lifetime is tied to the Python process rather
+    than the local function frame -- a function-local ``ExitStack``
+    would be garbage-collected the moment this function returns,
+    closing the connection out from under future invocations.
 
     The same database file is used by ``main.py``, so a session ID
     created in the CLI can be resumed in the browser and vice versa.
     """
 
     settings = get_settings()
-    stack = ExitStack()
-    saver = stack.enter_context(get_checkpointer(settings.checkpoint_db))
+    saver = _RESOURCE_STACK.enter_context(get_checkpointer(settings.checkpoint_db))
     return build_graph(checkpointer=saver)
+
+
+# Module-level lifetime anchor for resources opened inside the cached
+# graph factory. Streamlit clears ``cache_resource`` via
+# ``st.cache_resource.clear()``; tests that need a fresh checkpoint
+# database also call :func:`_clear_resource_stack` so the SQLite
+# connection from the previous run is properly closed before a new
+# one is opened.
+_RESOURCE_STACK: ExitStack = ExitStack()
+
+
+def _clear_resource_stack() -> None:
+    """Close any resources held by ``_RESOURCE_STACK`` and reset it.
+
+    Tests use this to ensure each ``AppTest`` instance gets its own
+    SQLite connection. Production code never calls this.
+    """
+
+    global _RESOURCE_STACK
+    try:
+        _RESOURCE_STACK.close()
+    except Exception:
+        pass
+    _RESOURCE_STACK = ExitStack()
 
 
 # ---------------------------------------------------------------------------
