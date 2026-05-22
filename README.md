@@ -50,7 +50,7 @@ sensible default defined in `src/csa_agent/config.py`.
 |-----------------------|--------------------------------------------------|--------------------------------------------------|
 | `NEBIUS_API_KEY`      | API key for the Nebius Token Factory (required) | _no default — process exits if missing_         |
 | `NEBIUS_BASE_URL`     | OpenAI-compatible base URL                       | `https://api.studio.nebius.ai/v1/`              |
-| `NEBIUS_MODEL`        | Default chat model                               | `meta-llama/Meta-Llama-3.1-70B-Instruct`        |
+| `NEBIUS_MODEL`        | Default chat model                               | `meta-llama/Llama-3.3-70B-Instruct`             |
 | `BITEXT_DATASET_PATH` | Path to the Bitext CSV                           | `./data/bitext_customer_service.csv`            |
 | `CHECKPOINT_DB`       | SQLite file for LangGraph checkpoints            | `./checkpoints.db`                              |
 | `PROFILE_DIR`         | Directory for per-user profile JSON files        | `./profiles`                                    |
@@ -64,7 +64,7 @@ Example `.env`:
 
 ```ini
 NEBIUS_API_KEY=sk-...
-NEBIUS_MODEL=meta-llama/Meta-Llama-3.1-70B-Instruct
+NEBIUS_MODEL=meta-llama/Llama-3.3-70B-Instruct
 BITEXT_DATASET_PATH=./data/bitext_customer_service.csv
 CHECKPOINT_DB=./checkpoints.db
 PROFILE_DIR=./profiles
@@ -291,11 +291,11 @@ this factory, which reads `NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, and
 
 ## Model Justification
 
-The default model is **`meta-llama/Meta-Llama-3.1-70B-Instruct`**, served
+The default model is **`meta-llama/Llama-3.3-70B-Instruct`**, served
 through the Nebius Token Factory. It is a strong fit for this agent for
 three reasons:
 
-- **Tool calling.** Llama 3.1 70B Instruct is trained for tool use and works
+- **Tool calling.** Llama 3.3 70B Instruct is trained for tool use and works
   reliably with LangChain's OpenAI-compatible tool-calling protocol. The
   ReAct loop here issues structured calls to seven Pydantic-validated
   tools; weaker tool-calling models tend to emit malformed arguments or
@@ -303,7 +303,7 @@ three reasons:
 - **Cost-quality tradeoff for analytical reasoning.** Dataset analysis
   queries ("which intents are in the REFUND category?", "summarise the
   top categories") need solid multi-step reasoning but do not require a
-  frontier-tier model. The 70B Llama 3.1 sits in a sweet spot for Nebius
+  frontier-tier model. The 70B Llama 3.3 sits in a sweet spot for Nebius
   pricing and latency while still handling the router's three-way
   classification and the ReAct agent's planning robustly.
 - **Availability on Nebius.** The model is a first-class citizen of the

@@ -169,7 +169,7 @@ def test_defaults_match_design_table(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.nebius_base_url == "https://api.studio.nebius.ai/v1/"
 
     assert settings.nebius_model == DEFAULT_NEBIUS_MODEL
-    assert settings.nebius_model == "meta-llama/Meta-Llama-3.1-70B-Instruct"
+    assert settings.nebius_model == "meta-llama/Llama-3.3-70B-Instruct"
 
     assert settings.dataset_path == DEFAULT_DATASET_PATH
     assert settings.dataset_path == "./data/bitext_customer_service.csv"

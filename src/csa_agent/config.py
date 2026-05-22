@@ -15,7 +15,7 @@ Field             Env var                    Default
 ================  =========================  ==========================================
 nebius_api_key    NEBIUS_API_KEY             (required, no default)
 nebius_base_url   NEBIUS_BASE_URL            https://api.studio.nebius.ai/v1/
-nebius_model      NEBIUS_MODEL               meta-llama/Meta-Llama-3.1-70B-Instruct
+nebius_model      NEBIUS_MODEL               meta-llama/Llama-3.3-70B-Instruct
 dataset_path      BITEXT_DATASET_PATH        ./data/bitext_customer_service.csv
 checkpoint_db     CHECKPOINT_DB              ./checkpoints.db
 profile_dir       PROFILE_DIR                ./profiles
@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - exercised only when dotenv is absent
 # ---------------------------------------------------------------------------
 
 DEFAULT_NEBIUS_BASE_URL: Final[str] = "https://api.studio.nebius.ai/v1/"
-DEFAULT_NEBIUS_MODEL: Final[str] = "meta-llama/Meta-Llama-3.1-70B-Instruct"
+DEFAULT_NEBIUS_MODEL: Final[str] = "meta-llama/Llama-3.3-70B-Instruct"
 DEFAULT_DATASET_PATH: Final[str] = "./data/bitext_customer_service.csv"
 DEFAULT_CHECKPOINT_DB: Final[str] = "./checkpoints.db"
 DEFAULT_PROFILE_DIR: Final[str] = "./profiles"
