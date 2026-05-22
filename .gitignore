@@ -14,8 +14,12 @@ __pycache__/
 *$py.class
 *.pyc
 .pytest_cache/
+.hypothesis/
 .mypy_cache/
 .ruff_cache/
+
+# Local pytest scratch output (not meant for VCS)
+pytest_run.txt
 
 # Environment files (never commit secrets)
 .env
